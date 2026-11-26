@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Guitar Tuner</title>
+<style>
+:root{--bg:#0f1012;--panel:#1a1c20;--line:#2c2f36;--text:#f1f1ee;--dim:#8b8f98;--ok:#3ddc84;--warn:#ffb648;--bad:#ff5d5d}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;align-items:center;padding:18px 16px calc(18px + env(safe-area-inset-bottom));min-height:100%}
+main{width:100%;max-width:440px;display:flex;flex-direction:column;align-items:center;flex:1}
+h1{font-size:15px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:0 0 6px}
+#gauge{width:100%;max-width:400px;display:block}
+#note{font-size:108px;font-weight:800;line-height:1;margin-top:-34px;letter-spacing:-.03em;transition:color .12s}
+#note small{font-size:34px;font-weight:600;color:var(--dim);margin-left:2px}
+#cents{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:6px;min-height:32px}
+#hint{font-size:20px;font-weight:600;min-height:28px;margin-top:4px}
+#hz{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums;min-height:18px;margin-top:4px}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dim{color:var(--dim)}
+.stale #note,.stale #cents,.stale #hint{opacity:.45}
+#strings{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;width:100%;margin-top:18px}
+#strings button{position:relative;aspect-ratio:1;border-radius:14px;border:2px solid var(--line);background:var(--panel);color:var(--text);font-size:22px;font-weight:700;cursor:pointer;padding:0}
+#strings button span{display:block;font-size:10px;font-weight:500;color:var(--dim);margin-top:1px}
+#strings button.active{border-color:var(--text)}
+#strings button.done{background:#143524;border-color:var(--ok);color:var(--ok)}
+#strings button.done::after{content:"✓";position:absolute;top:2px;right:6px;font-size:12px}
+#row{display:flex;gap:8px;width:100%;margin-top:10px}
+#row button{flex:1;padding:12px 8px;border-radius:12px;border:2px solid var(--line);background:var(--panel);color:var(--text);font-size:14px;font-weight:600;cursor:pointer}
+#row button.on{border-color:var(--text)}
+#start{margin-top:22px;width:100%;padding:18px;border-radius:16px;border:0;background:var(--ok);color:#06210f;font-size:20px;font-weight:800;cursor:pointer}
+#msg{color:var(--bad);font-size:14px;margin-top:10px;text-align:center;min-height:18px}
+#level{width:100%;height:4px;background:var(--line);border-radius:2px;margin-top:14px;overflow:hidden}
+#level i{display:block;height:100%;width:0;background:var(--dim)}
+p.tip{color:var(--dim);font-size:13px;text-align:center;margin:14px 0 0;line-height:1.45}
+</style></head>
+<body><main>
+<h1>Guitar Tuner</h1>
+<svg id="gauge" viewBox="0 0 400 215" aria-hidden="true">
+  <g id="ticks"></g>
+  <path id="zone" d="" fill="none" stroke="#3ddc84" stroke-width="10" stroke-linecap="round" opacity=".35"/>
+  <text x="38" y="208" fill="#8b8f98" font-size="13" text-anchor="middle">flat</text>
+  <text x="362" y="208" fill="#8b8f98" font-size="13" text-anchor="middle">sharp</text>
+  <g id="needle" style="transform-origin:200px 200px;transition:transform .09s linear">
+    <line x1="200" y1="200" x2="200" y2="38" stroke="#8b8f98" stroke-width="4" stroke-linecap="round" id="nl"/>
+  </g>
+  <circle cx="200" cy="200" r="9" fill="#8b8f98" id="hub"/>
+</svg>
+<div id="note" class="dim">–</div>
+<div id="cents"></div>
+<div id="hint" class="dim">Tap start, then pluck a string</div>
+<div id="hz"></div>
+<div id="strings"></div>
+<div id="row"><button id="auto" class="on">Auto detect string</button><button id="tone">Play target note</button></div>
+<button id="start">Start tuner</button>
+<div id="level" hidden><i></i></div>
+<div id="msg"></div>
+<p class="tip">Pluck one string and let it ring. Turn the peg until the needle is centered and everything goes green. Tap a string to lock onto it.</p>
+</main>
+<script>
+/*DETECT-START*/
+// YIN pitch detector. Returns {freq, clarity} or null.
+function detectPitch(buf, sr){
+  const n = buf.length, W = n >> 1;
+  let rms = 0;
+  for (let i = 0; i < n; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / n);
+  if (rms < 0.006) return null;
+  const minTau = Math.max(2, Math.floor(sr / 1200));
+  const maxTau = Math.min(W - 2, Math.ceil(sr / 62));
+  const d = new Float32Array(maxTau + 2);
+  for (let tau = 1; tau <= maxTau + 1; tau++){
+    let s = 0;
+    for (let i = 0; i < W; i++){ const x = buf[i] - buf[i + tau]; s += x * x; }
+    d[tau] = s;
+  }
+  let run = 0; d[0] = 1;
+  for (let tau = 1; tau <= maxTau + 1; tau++){ run += d[tau]; d[tau] = run ? d[tau] * tau / run : 1; }
+  let t = -1;
+  for (let tau = minTau; tau <= maxTau; tau++){
+    if (d[tau] < 0.12){ while (tau + 1 <= maxTau && d[tau + 1] < d[tau]) tau++; t = tau; break; }
+  }
+  if (t < 0){
+    let best = 1, bt = -1;
+    for (let tau = minTau; tau <= maxTau; tau++) if (d[tau] < best){ best = d[tau]; bt = tau; }
+    if (bt < 0 || best > 0.3) return null;
+    t = bt;
+  }
+  let bt = t;
+  if (t > 1 && t < maxTau + 1){
+    const a = d[t - 1], b = d[t], c = d[t + 1], den = a - 2 * b + c;
+    if (den) bt = t + (a - c) / (2 * den);
+  }
+  return { freq: sr / bt, clarity: 1 - d[t], rms };
+}
+/*DETECT-END*/
+
+const STR = [
+  {n:'E',o:2,f:82.407,label:'6th'},{n:'A',o:2,f:110,label:'5th'},{n:'D',o:3,f:146.832,label:'4th'},
+  {n:'G',o:3,f:195.998,label:'3rd'},{n:'B',o:3,f:246.942,label:'2nd'},{n:'E',o:4,f:329.628,label:'1st'}];
+const IN_TUNE = 4, $ = id => document.getElementById(id);
+let locked = -1, actx, analyser, buf, recent = [], shown = null, lastHeard = 0, okSince = 0, toneNode = null, curIdx = -1;
+
+// gauge
+const P = (deg, r) => { const a = (deg - 90) * Math.PI / 180; return [200 + r * Math.cos(a), 200 + r * Math.sin(a)]; };
+(function(){
+  let h = '';
+  for (let c = -50; c <= 50; c += 5){
+    const deg = c * 1.5, big = c % 25 === 0, [x1,y1] = P(deg, 178), [x2,y2] = P(deg, big ? 156 : 166);
+    h += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c===0?'#f1f1ee':'#4a4e57'}" stroke-width="${big?3:2}" stroke-linecap="round"/>`;
+  }
+  $('ticks').innerHTML = h;
+  const [ax,ay] = P(-IN_TUNE*1.5, 188), [bx,by] = P(IN_TUNE*1.5, 188);
+  $('zone').setAttribute('d', `M${ax} ${ay} A188 188 0 0 1 ${bx} ${by}`);
+})();
+
+STR.forEach((s, i) => {
+  const b = document.createElement('button');
+  b.innerHTML = s.n + '<span>' + s.label + '</span>';
+  b.onclick = () => { locked = locked === i ? -1 : i; recent = []; shown = null; okSince = 0; stopTone(); ui(); };
+  $('strings').appendChild(b);
+});
+$('auto').onclick = () => { locked = -1; recent = []; stopTone(); ui(); };
+function ui(){
+  [...$('strings').children].forEach((b, i) => b.classList.toggle('active', i === (locked >= 0 ? locked : curIdx)));
+  $('auto').classList.toggle('on', locked < 0);
+  $('auto').textContent = locked < 0 ? 'Auto detect string' : 'Locked on ' + STR[locked].n + ' · tap for auto';
+}
+
+function stopTone(){ if (toneNode){ try{ toneNode.g.gain.setTargetAtTime(0, actx.currentTime, .05); toneNode.stop(actx.currentTime + .3); }catch(e){} toneNode = null; $('tone').classList.remove('on'); $('tone').textContent = 'Play target note'; } }
+$('tone').onclick = () => {
+  if (toneNode) return stopTone();
+  const i = locked >= 0 ? locked : (curIdx >= 0 ? curIdx : 0);
+  actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume();
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = 'triangle'; o.frequency.value = STR[i].f * (STR[i].f < 120 ? 2 : 1); g.gain.value = .25;
+  o.connect(g).connect(actx.destination); o.g = g; o.start(); toneNode = o;
+  $('tone').classList.add('on'); $('tone').textContent = 'Stop ' + STR[i].n + ' note';
+};
+
+$('start').onclick = async () => {
+  $('msg').textContent = '';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ $('msg').textContent = 'This browser will not share the microphone here. Open this page directly in Safari or Chrome.'; return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } }); }
+  catch (e){ $('msg').textContent = e && e.name === 'NotAllowedError' ? 'Microphone permission was denied. Allow the mic for this site and tap start again.' : 'Could not open the microphone (' + (e && e.name || 'error') + ').'; return; }
+  actx = actx || new (window.AudioContext || window.webkitAudioContext)(); await actx.resume();
+  analyser = actx.createAnalyser(); analyser.fftSize = 4096; analyser.smoothingTimeConstant = 0;
+  actx.createMediaStreamSource(stream).connect(analyser);
+  buf = new Float32Array(analyser.fftSize);
+  $('start').hidden = true; $('level').hidden = false;
+  $('hint').textContent = 'Listening. Pluck a string.';
+  try { navigator.wakeLock && navigator.wakeLock.request('screen').catch(()=>{}); } catch(e){}
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) actx.resume(); });
+  loop();
+};
+
+function setNeedle(c, cls){
+  const col = cls === 'ok' ? '#3ddc84' : cls === 'warn' ? '#ffb648' : cls === 'bad' ? '#ff5d5d' : '#8b8f98';
+  $('needle').style.transform = 'rotate(' + Math.max(-50, Math.min(50, c)) * 1.5 + 'deg)';
+  $('nl').setAttribute('stroke', col); $('hub').setAttribute('fill', col);
+  $('zone').setAttribute('opacity', cls === 'ok' ? 1 : .35);
+}
+
+function loop(){
+  requestAnimationFrame(loop);
+  if (toneNode) return; // don't listen to our own reference tone
+  analyser.getFloatTimeDomainData(buf);
+  const now = performance.now(), r = detectPitch(buf, actx.sampleRate);
+  let rms = 0; for (let i = 0; i < buf.length; i += 8) rms += buf[i] * buf[i];
+  $('level').firstElementChild.style.width = Math.min(100, Math.sqrt(rms / (buf.length / 8)) * 600) + '%';
+  if (r && r.clarity > 0.8 && r.freq > 62 && r.freq < 1200){
+    recent.push(r.freq); if (recent.length > 5) recent.shift();
+    const med = [...recent].sort((a, b) => a - b)[recent.length >> 1];
+    let idx = locked;
+    if (idx < 0){ let bd = 1e9; STR.forEach((s, i) => { const dd = Math.abs(Math.log2(med / s.f)); if (dd < bd){ bd = dd; idx = i; } }); }
+    let f = med;
+    if (locked >= 0){ // forgive octave slips (harmonics) when locked to a string
+      const ratio = f / STR[idx].f;
+      if (ratio > 1.8 && ratio < 2.2) f /= 2; else if (ratio > 2.8 && ratio < 3.2) f /= 3; else if (ratio > .45 && ratio < .55) f *= 2;
+    }
+    const cents = 1200 * Math.log2(f / STR[idx].f);
+    if (idx !== curIdx || shown === null || Math.abs(cents - shown) > 60) shown = cents; else shown += (cents - shown) * 0.35;
+    curIdx = idx; lastHeard = now;
+    render(idx, shown, f, now);
+  } else if (now - lastHeard > 250){
+    recent = [];
+    if (now - lastHeard > 2500 && lastHeard){ document.body.classList.add('stale'); okSince = 0; }
+  }
+}
+
+function render(idx, c, f, now){
+  document.body.classList.remove('stale');
+  const s = STR[idx], a = Math.abs(c), cls = a <= IN_TUNE ? 'ok' : a <= 15 ? 'warn' : 'bad';
+  $('note').className = cls; $('note').innerHTML = s.n + '<small>' + s.o + '</small>';
+  const rc = Math.round(c);
+  $('cents').className = cls; $('cents').textContent = a > 99 ? (c > 0 ? 'way sharp' : 'way flat') : (rc > 0 ? '+' : '') + rc + ' cents';
+  let hint;
+  if (cls === 'ok'){ hint = 'In tune'; if (!okSince) okSince = now; if (now - okSince > 600){ $('strings').children[idx].classList.add('done'); hint = 'In tune ✓ ' + (nextString(idx)); } }
+  else { okSince = 0; hint = c < 0 ? (a > 15 ? 'Too low. Tighten ↑' : 'A little low. Tighten slightly ↑') : (a > 15 ? 'Too high. Loosen ↓' : 'A little high. Loosen slightly ↓'); }
+  $('hint').className = cls; $('hint').textContent = hint;
+  $('hz').textContent = f.toFixed(1) + ' Hz · target ' + s.f.toFixed(1) + ' Hz';
+  setNeedle(c, cls); ui();
+}
+function nextString(idx){
+  const left = STR.map((s, i) => i).filter(i => !$('strings').children[i].classList.contains('done'));
+  if (!left.length) return 'All six strings are in tune!';
+  return 'Next: ' + STR[left[0]].n + ' (' + STR[left[0]].label + ')';
+}
+ui();
+</script>
+</body></html>
