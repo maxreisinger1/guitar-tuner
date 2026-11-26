@@ -64,7 +64,7 @@ function detectPitch(buf, sr){
   let rms = 0;
   for (let i = 0; i < n; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / n);
-  if (rms < 0.006) return null;
+  if (rms < 0.0012) return null;
   const minTau = Math.max(2, Math.floor(sr / 1200));
   const maxTau = Math.min(W - 2, Math.ceil(sr / 62));
   const d = new Float32Array(maxTau + 2);
@@ -82,7 +82,7 @@ function detectPitch(buf, sr){
   if (t < 0){
     let best = 1, bt = -1;
     for (let tau = minTau; tau <= maxTau; tau++) if (d[tau] < best){ best = d[tau]; bt = tau; }
-    if (bt < 0 || best > 0.3) return null;
+    if (bt < 0 || best > 0.4) return null;
     t = bt;
   }
   let bt = t;
@@ -141,11 +141,11 @@ $('start').onclick = async () => {
   $('msg').textContent = '';
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ $('msg').textContent = 'This browser will not share the microphone here. Open this page directly in Safari or Chrome.'; return; }
   let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } }); }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:true } }); }
   catch (e){ $('msg').textContent = e && e.name === 'NotAllowedError' ? 'Microphone permission was denied. Allow the mic for this site and tap start again.' : 'Could not open the microphone (' + (e && e.name || 'error') + ').'; return; }
   actx = actx || new (window.AudioContext || window.webkitAudioContext)(); await actx.resume();
   analyser = actx.createAnalyser(); analyser.fftSize = 4096; analyser.smoothingTimeConstant = 0;
-  actx.createMediaStreamSource(stream).connect(analyser);
+  const hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 55; const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500; actx.createMediaStreamSource(stream).connect(hp).connect(lp).connect(analyser);
   buf = new Float32Array(analyser.fftSize);
   $('start').hidden = true; $('level').hidden = false;
   $('hint').textContent = 'Listening. Pluck a string.';
@@ -167,10 +167,11 @@ function loop(){
   analyser.getFloatTimeDomainData(buf);
   const now = performance.now(), r = detectPitch(buf, actx.sampleRate);
   let rms = 0; for (let i = 0; i < buf.length; i += 8) rms += buf[i] * buf[i];
-  $('level').firstElementChild.style.width = Math.min(100, Math.sqrt(rms / (buf.length / 8)) * 600) + '%';
-  if (r && r.clarity > 0.8 && r.freq > 62 && r.freq < 1200){
+  $('level').firstElementChild.style.width = Math.min(100, Math.sqrt(rms / (buf.length / 8)) * 2500) + '%';
+  if (r && r.clarity > 0.62 && r.freq > 62 && r.freq < 1200){
     recent.push(r.freq); if (recent.length > 5) recent.shift();
-    const med = [...recent].sort((a, b) => a - b)[recent.length >> 1];
+    const srt = [...recent].sort((a, b) => a - b), med = srt[recent.length >> 1];
+    if (recent.length < 3 || srt[srt.length - 2] / srt[1] > 1.06) return; // wait for a steady reading
     let idx = locked;
     if (idx < 0){ let bd = 1e9; STR.forEach((s, i) => { const dd = Math.abs(Math.log2(med / s.f)); if (dd < bd){ bd = dd; idx = i; } }); }
     let f = med;
