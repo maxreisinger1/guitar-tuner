@@ -54,6 +54,7 @@ p.tip{color:var(--dim);font-size:13px;text-align:center;margin:14px 0 0;line-hei
 <button id="start">Start tuner</button>
 <div id="level" hidden><i></i></div>
 <div id="msg"></div>
+<div id="dbg" style="color:#5d6068;font-size:11px;margin-top:8px;font-variant-numeric:tabular-nums">v3</div>
 <p class="tip">Pluck one string and let it ring. Turn the peg until the needle is centered and everything goes green. Tap a string to lock onto it.</p>
 </main>
 <script>
@@ -98,7 +99,7 @@ const STR = [
   {n:'E',o:2,f:82.407,label:'6th'},{n:'A',o:2,f:110,label:'5th'},{n:'D',o:3,f:146.832,label:'4th'},
   {n:'G',o:3,f:195.998,label:'3rd'},{n:'B',o:3,f:246.942,label:'2nd'},{n:'E',o:4,f:329.628,label:'1st'}];
 const IN_TUNE = 4, $ = id => document.getElementById(id);
-let locked = -1, actx, analyser, buf, recent = [], shown = null, lastHeard = 0, okSince = 0, toneNode = null, curIdx = -1;
+let micTrack = null, peak = 0, frames = 0, locked = -1, actx, analyser, buf, recent = [], shown = null, lastHeard = 0, okSince = 0, toneNode = null, curIdx = -1;
 
 // gauge
 const P = (deg, r) => { const a = (deg - 90) * Math.PI / 180; return [200 + r * Math.cos(a), 200 + r * Math.sin(a)]; };
@@ -140,17 +141,19 @@ $('tone').onclick = () => {
 $('start').onclick = async () => {
   $('msg').textContent = '';
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ $('msg').textContent = 'This browser will not share the microphone here. Open this page directly in Safari or Chrome.'; return; }
+  actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume().catch(()=>{});
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:true } }); }
   catch (e){ $('msg').textContent = e && e.name === 'NotAllowedError' ? 'Microphone permission was denied. Allow the mic for this site and tap start again.' : 'Could not open the microphone (' + (e && e.name || 'error') + ').'; return; }
-  actx = actx || new (window.AudioContext || window.webkitAudioContext)(); await actx.resume();
+  try { await actx.resume(); } catch(e){}
   analyser = actx.createAnalyser(); analyser.fftSize = 4096; analyser.smoothingTimeConstant = 0;
-  const hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 55; const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500; actx.createMediaStreamSource(stream).connect(hp).connect(lp).connect(analyser);
+  const hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 55; const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500; actx.createMediaStreamSource(stream).connect(hp).connect(lp).connect(analyser); const mute = actx.createGain(); mute.gain.value = 0; analyser.connect(mute).connect(actx.destination); micTrack = stream.getAudioTracks()[0];
   buf = new Float32Array(analyser.fftSize);
   $('start').hidden = true; $('level').hidden = false;
   $('hint').textContent = 'Listening. Pluck a string.';
   try { navigator.wakeLock && navigator.wakeLock.request('screen').catch(()=>{}); } catch(e){}
   document.addEventListener('visibilitychange', () => { if (!document.hidden) actx.resume(); });
+  ['touchend','click'].forEach(ev => document.addEventListener(ev, () => { if (actx.state !== 'running') actx.resume(); }));
   loop();
 };
 
@@ -167,7 +170,14 @@ function loop(){
   analyser.getFloatTimeDomainData(buf);
   const now = performance.now(), r = detectPitch(buf, actx.sampleRate);
   let rms = 0; for (let i = 0; i < buf.length; i += 8) rms += buf[i] * buf[i];
-  $('level').firstElementChild.style.width = Math.min(100, Math.sqrt(rms / (buf.length / 8)) * 2500) + '%';
+  const lv = Math.sqrt(rms / (buf.length / 8)); peak = Math.max(lv, peak * 0.97);
+  $('level').firstElementChild.style.width = Math.min(100, lv * 2500) + '%';
+  if (++frames % 15 === 0){
+    const st = actx.state, tr = micTrack ? (micTrack.muted ? 'muted' : micTrack.readyState) : 'none';
+    $('dbg').textContent = 'v3 · audio ' + st + ' · mic ' + tr + ' · level ' + (peak * 1000).toFixed(1);
+    if (st !== 'running'){ $('hint').className = 'warn'; $('hint').textContent = 'Tap anywhere to wake the audio'; }
+    else if (!lastHeard && frames > 240 && peak < 0.0005){ $('hint').className = 'warn'; $('hint').textContent = 'The mic is sending silence'; }
+  }
   if (r && r.clarity > 0.62 && r.freq > 62 && r.freq < 1200){
     recent.push(r.freq); if (recent.length > 5) recent.shift();
     const srt = [...recent].sort((a, b) => a - b), med = srt[recent.length >> 1];
