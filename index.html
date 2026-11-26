@@ -54,7 +54,7 @@ p.tip{color:var(--dim);font-size:13px;text-align:center;margin:14px 0 0;line-hei
 <button id="start">Start tuner</button>
 <div id="level" hidden><i></i></div>
 <div id="msg"></div>
-<div id="dbg" style="color:#5d6068;font-size:11px;margin-top:8px;font-variant-numeric:tabular-nums">v4</div>
+<div id="dbg" style="color:#5d6068;font-size:11px;margin-top:8px;font-variant-numeric:tabular-nums">v5</div>
 <p class="tip">Pluck one string and let it ring. Turn the peg until the needle is centered and everything goes green. Tap a string to lock onto it.</p>
 </main>
 <script>
@@ -65,7 +65,7 @@ function detectPitch(buf, sr){
   let rms = 0;
   for (let i = 0; i < n; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / n);
-  if (rms < 0.0008) return null;
+  if (rms < 0.00003) return null;
   const minTau = Math.max(2, Math.floor(sr / 1200));
   const maxTau = Math.min(W - 2, Math.ceil(sr / 62));
   const d = new Float32Array(maxTau + 2);
@@ -143,8 +143,10 @@ $('start').onclick = async () => {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ $('msg').textContent = 'This browser will not share the microphone here. Open this page directly in Safari or Chrome.'; return; }
   actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume().catch(()=>{});
   let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:true } }); }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } }); }
   catch (e){ $('msg').textContent = e && e.name === 'NotAllowedError' ? 'Microphone permission was denied. Allow the mic for this site and tap start again.' : 'Could not open the microphone (' + (e && e.name || 'error') + ').'; return; }
+  stopTone(); try { actx.close(); } catch(e){}
+  actx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
   try { await actx.resume(); } catch(e){}
   analyser = actx.createAnalyser(); analyser.fftSize = 8192; analyser.smoothingTimeConstant = 0;
   const hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 55; const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500; const src = actx.createMediaStreamSource(stream); src.connect(hp); hp.connect(lp); lp.connect(analyser); window._keep = [stream, src, hp, lp, analyser]; const mute = actx.createGain(); mute.gain.value = 0; analyser.connect(mute); mute.connect(actx.destination); window._keep.push(mute); micTrack = stream.getAudioTracks()[0];
@@ -171,21 +173,22 @@ function loop(){
   const now = performance.now(), r = detectPitch(buf, actx.sampleRate);
   let rms = 0; for (let i = 0; i < buf.length; i += 8) rms += buf[i] * buf[i];
   const lv = Math.sqrt(rms / (buf.length / 8)); peak = Math.max(lv, peak * 0.97);
-  $('level').firstElementChild.style.width = Math.min(100, lv * 2500) + '%';
+  $('level').firstElementChild.style.width = Math.max(0, Math.min(100, (20 * Math.log10(lv + 1e-9) + 85) * 1.6)) + '%';
   if (++frames % 15 === 0){
     const st = actx.state, tr = micTrack ? (micTrack.muted ? 'muted' : micTrack.readyState) : 'none';
-    $('dbg').textContent = 'v4 · audio ' + st + ' · mic ' + tr + ' · level ' + (peak * 1000).toFixed(1) + ' · ' + (r ? r.freq.toFixed(0) + ' Hz' : 'no pitch');
+    $('dbg').textContent = 'v5 · audio ' + st + ' · mic ' + tr + ' · level ' + (peak * 1000).toFixed(2) + ' / floor ' + (floorLv * 1000).toFixed(2) + ' · ' + (r ? r.freq.toFixed(0) + ' Hz' : 'no pitch');
     if (st !== 'running'){ $('hint').className = 'warn'; $('hint').textContent = 'Tap anywhere to wake the audio'; }
-    else if (!lastHeard && frames > 240 && peak < 0.0005){ $('hint').className = 'warn'; $('hint').textContent = 'The mic is sending silence'; }
+    else if (!lastHeard && frames > 240 && peak < 0.00001){ $('hint').className = 'warn'; $('hint').textContent = 'The mic is sending silence'; }
   }
   slowPeak = Math.max(lv, slowPeak * 0.992);
-  floorLv = Math.min(lv, floorLv * 1.003 + 1e-7);
-  const faded = lv < floorLv * 3 || lv < slowPeak * 0.12 || (r && r.clarity < 0.75 && lv < slowPeak * 0.3); // tail of a note is mostly noise: hold the last reading
+  floorLv = Math.min(lv, floorLv * 1.003 + 1e-8);
+  const faded = lv < floorLv * 2.2; // barely above room noise: hold the last reading
   if (r && !faded && r.freq > 55 && r.freq < 1400){
     recent.push(r.freq); if (recent.length > 7) recent.shift();
     lastDetect = now;
-    if (recent.length < 2) return;
+    if (recent.length < 3) return;
     const srt = [...recent].sort((a, b) => a - b), med = srt[srt.length >> 1];
+    if (recent.filter(x => Math.abs(x / med - 1) < 0.03).length < Math.ceil(recent.length * 0.6)) return; // readings disagree: noise
     let idx = locked, f = med;
     if (idx < 0){
       // nearest string, also trying one and two octaves down in case the mic only caught an overtone
@@ -194,7 +197,7 @@ function loop(){
         const dd = Math.abs(1200 * Math.log2(med / div / s.f)) + k * 30;
         if (dd < bd){ bd = dd; idx = i; f = med / div; }
       }));
-      if (curIdx >= 0 && idx !== curIdx && now - lastHeard < 4000 && (r.clarity < 0.85 || lv < slowPeak * 0.4)) return; // only a clear, fresh pluck may switch strings
+      if (curIdx >= 0 && idx !== curIdx && now - lastHeard < 4000 && r.clarity < 0.85) return; // only a clear, fresh pluck may switch strings
     }
     if (locked >= 0 || idx === curIdx){
       const ratio = f / STR[idx].f;
@@ -206,7 +209,7 @@ function loop(){
     render(idx, shown, f, now);
   } else {
     if (now - lastDetect > 400) recent = [];
-    if (now - lastHeard > 700 && lv > 0.004 && actx.state === 'running'){ $('hint').className = 'dim'; $('hint').textContent = 'Hearing sound, no clear note yet. Pluck one string.'; }
+    if (now - lastHeard > 700 && lv > floorLv * 4 && actx.state === 'running'){ $('hint').className = 'dim'; $('hint').textContent = 'Hearing sound, no clear note yet. Pluck one string.'; }
     if (now - lastHeard > 3000 && lastHeard){ document.body.classList.add('stale'); okSince = 0; }
   }
 }
